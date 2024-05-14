@@ -271,8 +271,9 @@ function evolve(Eᵢ, Eₖ, Ebins, umin, umax)
     ω, 𝐏₀, f_ω, f_ω̄ = initialize_system_single(Eᵢ, Eₖ, Ebins, Ē, ϵ_ν, Δm²₁₃, L_ν)
     prob = ODEProblem(dPdr, 𝐏₀, (umin, umax), [ω, f_ω, f_ω̄, 𝐁, 𝐋, r₀, 𝐟])
     println("Solving the ODE...")
-    sol = solve(prob, CVODE_BDF(linear_solver = :GMRES), abstol = 1e-10, save_everystep = false, saveat = 0.1, maxiters = 1e10)
-    return sol
+    sol = solve(prob, CVODE_BDF(linear_solver = :GMRES), maxiters = Int(1e10), abstol = 1e-10, save_everystep = false, saveat = 0.1)
+    plot(sol.t, sol[3, 6, :], seriestype=:path,linestyle=:solid, lc=:blue, framestyle = :box, grid=false, legend = false, dpi = 300)
+    savefig("vacuum+coll.png")
 end
 
 # Setting up the allocated arrays
