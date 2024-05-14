@@ -1,203 +1,316 @@
-using SpecialFunctions, FastGaussQuadrature, LinearAlgebra, Integrals, Plots, Sundials, JLD2, Printf
+#==========================================================================================
+                    ODE SOLVER FOR NEUTRINO OSCILLATIONS IN A SUPERNOVA 
 
-# Physical constants
-const delta_m_sq_13 = 2.458e-3 # eV^2
-const theta_12 = 0.58 # radians
-const theta_13 = 0.15 # radians
-const inv_km_to_eV = 0.197e-9 # eV
-const J_to_eV = 6.25e18 # eV
-const inv_s_to_eV = 6.58e-16 # eV
+DESCRIPTION: This script solves the neutrino oscillation equations in a supernova using the
+Sundials.jl package. The vacuum, matter and collective terms are all considered. The script
+uses the GL method as the integral solver. CVODE_BDF is used as the ODE solver.
+AUTHOR: Tudor Ciobanu
+==========================================================================================#
 
-# Model parameters
-const eps = 0.031 # unitless
-const E_avg_nu_e = 10e6 # eV
-const E_avg_nubar_e = 15e6 # eV
-const E_avg_nu_x = 20e6 # eV
-const E_avg_nu_y = 20e6 # eV
-const r_0 = 10 # km
-const eps_nu = 3 # unitless
-const Lum = 1.5e44*J_to_eV*inv_s_to_eV # eV^2
+#==========================================================================================
+                        IMPORTING PACKAGES AND LIBRARIES
+==========================================================================================#
+using DifferentialEquations, SpecialFunctions, FastGaussQuadrature, LinearAlgebra, Integrals, Sundials, JLD2, Printf, LaTeXStrings, BenchmarkTools
 
-# Allocating arrays
-B = zeros(8)
-L = zeros(8)
-f_pos = zeros(50)
-f_neg = zeros(50)
+#==========================================================================================
+                        SU(3) LIE ALGEBRA STRUCTURE CONSTANTS
+                    
+DESCRIPTION: Sets the structure constants for the SU(3) Lie algebra. The structure
+constants are used to define the cross product of the Lie algebra elements. The
+structure constants are defined for the 8 generators of the SU(3) Lie algebra. The
+structure constants are totally antisymmetric and are defined as follows:
+f₁₂₃ = 2, f₁₄₇ = 1, f₁₆₅ = 1, f₂₄₆ = 1, f₂₅₇ = 1, f₃₄₅ = 1, f₃₇₆ = 1, f₆₇₈ = √3, f₄₅₈ = √3
+==========================================================================================#
 
-# GL integral and transformation for arbitrary boundaries
-function transform_gauss_xw(x, w, a, b)
-    x1 = a .+ (b-a)/2 * (x .+ 1)
-    w1 = (b-a)/2 * w
-    return (x=x1, w=w1)
+function set_structure_constants(𝐟, indices, value)
+    for (i, j, k) in indices
+        𝐟[i, j, k] = value
+        𝐟[j, k, i] = value
+        𝐟[k, i, j] = value
+        𝐟[j, i, k] = -value
+        𝐟[i, k, j] = -value
+        𝐟[k, j, i] = -value
+    end
 end
 
-function GL_integral(f, a, b, order)
-    x, w = gausslegendre(order)
-    T = transform_gauss_xw(x, w, a, b)
-    x1 = T.x; w1 = T.w;
-    I = dot(w1, f)
-    return I
-end
+#==========================================================================================
+                        SU(3) GENERALIZED CROSS PRODUCT
 
-# Lie algebra structure constants
-f_abc = zeros((8, 8, 8))
-f_abc[1,2,3] = 2; f_abc[1,3,2] = -2; f_abc[2,1,3] = -2; f_abc[2,3,1] = 2; f_abc[3,1,2] = 2; f_abc[3,2,1] = -2;
-f_abc[1,4,7] = 1; f_abc[1,7,4] = -1; f_abc[4,1,7] = -1; f_abc[4,7,1] = 1; f_abc[7,1,4] = 1; f_abc[7,4,1] = -1;
-f_abc[1,6,5] = 1; f_abc[1,5,6] = -1; f_abc[6,1,5] = -1; f_abc[6,5,1] = 1; f_abc[5,1,6] = 1; f_abc[5,6,1] = -1;
-f_abc[2,4,6] = 1; f_abc[2,6,4] = -1; f_abc[4,2,6] = -1; f_abc[4,6,2] = 1; f_abc[6,2,4] = 1; f_abc[6,4,2] = -1;
-f_abc[2,5,7] = 1; f_abc[2,7,5] = -1; f_abc[5,2,7] = -1; f_abc[5,7,2] = 1; f_abc[7,2,5] = 1; f_abc[7,5,2] = -1;
-f_abc[3,4,5] = 1; f_abc[3,5,4] = -1; f_abc[4,3,5] = -1; f_abc[4,5,3] = 1; f_abc[5,3,4] = 1; f_abc[5,4,3] = -1;
-f_abc[3,7,6] = 1; f_abc[3,6,7] = -1; f_abc[7,3,6] = -1; f_abc[7,6,3] = 1; f_abc[6,3,7] = 1; f_abc[6,7,3] = -1;
-f_abc[6,7,8] = sqrt(3); f_abc[6,8,7] = -sqrt(3); f_abc[7,6,8] = -sqrt(3); f_abc[7,8,6] = sqrt(3); f_abc[8,6,7] = sqrt(3); f_abc[8,7,6] = -sqrt(3);
-f_abc[4,5,8] = sqrt(3); f_abc[4,8,5] = -sqrt(3); f_abc[5,4,8] = -sqrt(3); f_abc[5,8,4] = sqrt(3); f_abc[8,4,5] = sqrt(3); f_abc[8,5,4] = -sqrt(3);
+DESCRIPTION: Defines the generalized cross product for the SU(3) Lie algebra. The cross
+product is defined for the 8 generators of the SU(3) Lie algebra. The cross product is
+defined as follows:
+C = ∑fᵢⱼₖ AᵢBⱼêₖ
+where A, B and C are the elements of the SU(3) Lie algebra and fᵢⱼₖ are the structure
+constants of the SU(3) Lie algebra.
+==========================================================================================#
 
-# Lie algebra cross product
-function cross_prod(A, B)
-    C = zeros(8)
-    for k in 1:8
+function cross_prod(A::Array{Float64, 1}, B::Array{Float64, 1}, 𝐟::Array{Float64, 3})
+    C = zeros(Float64, 8)
+    @inbounds @simd for k in 1:8
         for i in 1:8
             for j in 1:8
-                C[k] += f_abc[i, j, k]*A[i]*B[j]
+                C[k] += 𝐟[i, j, k]*A[i]*B[j]
             end
         end
     end
     return C
 end
 
-# Energy averages
-E_avg = Dict([("nu_e", E_avg_nu_e), ("nubar_e", E_avg_nubar_e), ("nu_x", E_avg_nu_x), ("nubar_x", E_avg_nu_x), ("nu_y", E_avg_nu_y), ("nubar_y", E_avg_nu_y)])
+#==========================================================================================
+                                    ω FUNCTION
 
-# Omega domain
-function omega(E)
-    omega = abs(delta_m_sq_13)/(2*E)
-    return omega
+DESCRIPTION: Defines the neutrino oscillation frequency as a function of the neutrino
+energy. The neutrino oscillation frequency is defined as follows:
+ω = |Δm²₁₃|/(2E)
+where Δm²₁₃ is the mass squared difference between the first and third neutrino mass
+eigenstates and E is the neutrino energy.
+==========================================================================================#
+
+function omega(E::Float64, Δm²₁₃::Float64)
+    return abs(Δm²₁₃)/(2*E)
 end
 
-# Mass hierarchy dependent contribution
-function h()
-    h = sign(delta_m_sq_13)
-    return h
+#==========================================================================================
+                                COLLECTIVE POTENTIAL
+
+DESCRIPTION: Defines the collective potential as a function of the radial coordinate. The
+collective potential is defined as follows:
+μ = 0.45e5*(4*r₀^2)/(3*r^2)*(1 - sqrt(1 - r₀^2/r^2) - r₀^2/(4*r^2)) [km⁻¹]
+where r₀ links to the radius of the neutrino sphere and r is the radial coordinate.
+==========================================================================================#
+
+function μ(r::Float64, r₀::Int)
+    return 0.45e5*(4*r₀^2)/(3*r^2)*(1 - sqrt(1 - r₀^2/r^2) - r₀^2/(4*r^2))
 end
 
-# Scaling factor
-function N()
-    N = (1 + eps_nu)^(1 + eps_nu)/gamma(1 + eps_nu)
-    return N
+#==========================================================================================
+                                MATTER POTENTIAL
+
+DESCRIPTION: Defines the matter potential as a function of the radial coordinate. The
+matter potential is defined as follows:
+λ = 1.84e6/(r^(2.4)) [km⁻¹]
+where r is the radial coordinate.
+==========================================================================================#
+
+function λ(r::Float64)
+    return 1.84e6/(r^(2.4))
 end
 
-# Spectra normalization factors
-function Phi_s(species)
-    Phi = Lum/E_avg[species]
-    return Phi
+#==========================================================================================
+                                SCALING FACTOR
+==========================================================================================#
+
+function N(ϵ_ν::Int)
+    return (1 + ϵ_ν)^(1 + ϵ_ν)/gamma(1 + ϵ_ν)
 end
 
-function Phi()
-    Phi = Phi_s("nu_e") + Phi_s("nubar_e") + 2*Phi_s("nu_x") + 2*Phi_s("nu_y")
-    return Phi
+#==========================================================================================
+                                FLUX AVERAGES
+==========================================================================================#
+
+function Φ_ν(species::String, Ē::Dict{String, Float64}, L_ν::Float64)
+    return L_ν/Ē[species]
 end
 
-# Spectra
-function f_e(E, species)
-    f = Lum*N()/(E_avg[species]^2)*(E/E_avg[species])^eps_nu*exp(-E/E_avg[species]*(eps_nu + 1))
+#==========================================================================================
+                             ENERGY DISTRIBUTION
+==========================================================================================#
+function f_e(E::Float64, Ē_ν::Float64, ϵ_ν::Int, L_ν::Float64)
+    f = L_ν*N(ϵ_ν)/(Ē_ν ^2)*(E/Ē_ν)^ϵ_ν*exp(-E/Ē_ν*(ϵ_ν + 1))
     return f
 end
 
-# Spectra in omega domain
-function f_o(omega, species)
-    f = abs(delta_m_sq_13)/(2*Phi()*omega^2)*f_e(abs(abs(delta_m_sq_13)/(2*omega)), species)
+#==========================================================================================
+                                ω DISTRIBUTION
+==========================================================================================#
+
+function f_o(ω::Float64, Ē_ν::Float64, Φ::Float64, ϵ_ν::Int, L_ν::Float64, Δm²₁₃::Float64)
+    E = abs(Δm²₁₃)/(2*ω)
+    f = E/(Φ*ω)*f_e(abs(E), Ē_ν, ϵ_ν, L_ν)
     return f
 end
 
-# Matter potential
-function lamb(r)
-    # r in km
-    lamb = 1.84e6/(r^(2.4))*inv_km_to_eV
-    return lamb
+#==========================================================================================
+                        INTEGRATION BOUNDS TRANSFORMATION
+==========================================================================================#
+
+function transform_gauss_xw(x::Array{Float64,1}, w::Array{Float64,1}, a::Float64, b::Float64)
+    x1 = a .+ (b-a)/2 * (x .+ 1)
+    w1 = (b-a)/2 * w
+    return (x=x1, w=w1)
 end
 
-# Self-interaction potential
-function mu(r)
-    # r in km
-    mu = 0.45e5*(4*r_0^2)/(3*r^2)*(1 - sqrt(1 - r_0^2/r^2) - r_0^2/(4*r^2))*inv_km_to_eV
-    return mu
+#==========================================================================================
+                            GAUSS-LEGENDRE INTEGRATION
+==========================================================================================#
+
+function GL_integral(f::Array{Float64,1}, a::Float64, b::Float64, order::Int)
+    x, w = gausslegendre(order)
+    T = transform_gauss_xw(x, w, a, b)
+    return dot(T.w, f)
 end
 
-# ODE system matrices
-function B_f()
-    B = [eps*sin(2*theta_12)*cos(theta_13),
-    0,
-    sin(theta_13)^2 - eps*(cos(theta_12)^2 - sin(theta_12)^2*cos(theta_13)^2),
-    (1 - eps*sin(theta_12)^2)*sin(2*theta_13),
-    0,
-    -eps*sin(2*theta_12)*sin(theta_13),
-    0,
-    eps/(2*sqrt(3))*(3*cos(theta_13)^2 - 1 + 3*sin(theta_13)^2*(2*cos(theta_12)^2 - 1)) + 1/sqrt(3)*(1 - 3*cos(theta_13)^2)]
-    return B
+#==========================================================================================
+                            SYSTEM INITIALIZATION
+==========================================================================================#
+
+function initialize_system_single(Eᵢ::Float64, Eₖ::Float64, Ebins::Int, Ē::Dict{String, Float64}, ϵ_ν::Int, Δm²₁₃::Float64, L_ν::Float64)
+    𝐏 = zeros(Float64, 16, Ebins)
+
+    #= Get the Gauss-Legendre quadrature points and weights based on the energy bins
+    and transform them to the ω range [ωₖ, ωᵢ] where ωₖ = ω(Eₖ) and ωᵢ = ω(Eᵢ).    =#
+    x, w = gausslegendre(Ebins)
+    T = transform_gauss_xw(x, w, omega(Eₖ, Δm²₁₃), omega(Eᵢ, Δm²₁₃)) 
+    ω = T.x
+
+    #= Calculate the flux averages for the neutrino species and set up the distribution
+    functions.                                                                      =#
+    Φ = Φ_ν("nu_e", Ē, L_ν) .+ Φ_ν("nubar_e", Ē, L_ν) .+ 2*Φ_ν("nu_x", Ē, L_ν) .+ 2*Φ_ν("nu_y", Ē, L_ν)
+    f_ω = f_o.(ω, Ē["nu_e"], Φ, ϵ_ν, L_ν, Δm²₁₃) .+ f_o.(ω, Ē["nu_x"], Φ, ϵ_ν, L_ν, Δm²₁₃) .+ f_o.(ω, Ē["nu_y"], Φ, ϵ_ν, L_ν, Δm²₁₃)
+    f_ω̄ = f_o.(-ω, Ē["nubar_e"], Φ, ϵ_ν, L_ν, Δm²₁₃) .+ f_o.(-ω, Ē["nubar_x"], Φ, ϵ_ν, L_ν, Δm²₁₃) .+ f_o.(-ω, Ē["nubar_y"], Φ, ϵ_ν, L_ν, Δm²₁₃)
+
+    #= Set up the initial polarization vectors. =#
+    for i in 1:Ebins
+        𝐏[3,i] = (f_o.(ω[i],  Ē["nu_e"], Φ, ϵ_ν, L_ν, Δm²₁₃) - f_o.(ω[i], Ē["nu_x"], Φ, ϵ_ν, L_ν, Δm²₁₃))/f_ω[i]
+        𝐏[8,i] = (f_o.(ω[i], Ē["nu_e"], Φ, ϵ_ν, L_ν, Δm²₁₃) + f_o.(ω[i], Ē["nu_x"], Φ, ϵ_ν, L_ν, Δm²₁₃) - 2*f_o.(ω[i], Ē["nu_y"], Φ, ϵ_ν, L_ν, Δm²₁₃))/(sqrt(3)*f_ω[i])
+        𝐏[11,i] = (f_o.(-ω[i], Ē["nubar_e"], Φ, ϵ_ν, L_ν, Δm²₁₃) - f_o.(-ω[i], Ē["nubar_x"], Φ, ϵ_ν, L_ν, Δm²₁₃))/f_ω̄[i]
+        𝐏[16,i] = (f_o.(-ω[i], Ē["nubar_e"], Φ, ϵ_ν, L_ν, Δm²₁₃) + f_o.(-ω[i], Ē["nubar_x"], Φ, ϵ_ν, L_ν, Δm²₁₃) - 2*f_o.(-ω[i], Ē["nubar_y"], Φ, ϵ_ν, L_ν, Δm²₁₃))/(sqrt(3)*f_ω̄[i])
+    end
+    return ω, 𝐏, f_ω, f_ω̄
 end
 
-function L_f()
-    L = [0, 0, 1, 0, 0, 0, 0, 1/sqrt(3)]
-    return L
-end
+#==========================================================================================
+                                    𝐃 MATRIX
+==========================================================================================#
 
-function D_f(omegas, P, Pbar)
-    D = zeros(8)
-    Pbar_rev = Pbar[:, end:-1:1]
-    for i in 1:8
-        arg = f_pos.*P[i,:]
-        arg_bar = -f_neg.*Pbar_rev[i,:]
-        D[i] = GL_integral(arg, omegas[1], omegas[end], 50) + GL_integral(arg_bar, -omegas[end], -omegas[1], 50)
+function D(𝐏::Array{Float64,2}, ω::Array{Float64,1}, f_ω::Array{Float64,1}, f_ω̄::Array{Float64,1}, order::Int)
+    D = zeros(Float64, 8)
+    ωᵢ = ω[1]
+    ωₖ = ω[end]
+    @inbounds for i in 1:8
+        D[i] = GL_integral(f_ω.*𝐏[i, :], ωᵢ, ωₖ, order) + GL_integral(reverse(f_ω̄.*𝐏[i+8, :]), -ωₖ, -ωᵢ, order)
     end
     return D
 end
 
-# System initialization
-function initialize_system(E_i, E_f, Ebins)
-    x, w = gausslegendre(Ebins)
-    T = transform_gauss_xw(x, w, omega(E_f), omega(E_i))
-    omegas = T.x
-    P = zeros(8, Ebins)
-    Pbar = zeros(8, Ebins)
-    for i in 1:Ebins
-        f_t_pos = (f_o.(omegas[i], "nu_e") + f_o.(omegas[i], "nu_x") + f_o.(omegas[i], "nu_y"))
-        f_t_neg = (f_o.(-omegas[i], "nubar_e") + f_o.(-omegas[i], "nubar_x") + f_o.(-omegas[i], "nubar_y"))
-        P[3,i] = (f_o.(omegas[i], "nu_e") - f_o.(omegas[i], "nu_x"))/f_t_pos
-        P[8,i] = (f_o.(omegas[i], "nu_e") + f_o.(omegas[i], "nu_x") - 2*f_o.(omegas[i], "nu_y"))/(sqrt(3)*f_t_pos)
-        Pbar[3,i] = (f_o.(-omegas[i], "nubar_e") - f_o.(-omegas[i], "nubar_x"))/(f_t_neg)
-        Pbar[8,i] = (f_o.(-omegas[i], "nubar_e") + f_o.(-omegas[i], "nubar_x") - 2*f_o.(-omegas[i], "nubar_y"))/(sqrt(3)*f_t_neg)
+#==========================================================================================
+                                    ODE FUNCTION
+==========================================================================================#
+
+function dPdr(du::Array{Float64,2}, u::Array{Float64,2}, p, t::Float64)
+    @printf("r = %f\n", t)
+
+    km⁻¹_to_eV = 1.97e-10 # eV
+
+    ω = @views p[1]
+    f_ω = @views p[2]
+    f_ω̄ = @views p[3]
+    𝐁 = @views p[4]
+    𝐋 = @views p[5]
+    r₀ = @views p[6]
+    𝐟 = @views p[7]
+    
+    Ebins = length(ω)
+
+    𝐃 = D(u, ω, f_ω, f_ω̄, Ebins)
+    λ_t = λ(t)
+    μ_t = μ(t, r₀)
+    @inbounds for i in 1:Ebins
+        ω_i = ω[i]/km⁻¹_to_eV
+        du[1:8, i] = @views cross_prod((ω_i.*𝐁 .+ λ_t.*𝐋 .+ μ_t.*𝐃), u[1:8, i], 𝐟)
+        du[9:16, i] = @views cross_prod((-ω_i.*𝐁 .+ λ_t.*𝐋 .+ μ_t.*𝐃), u[9:16, i], 𝐟)
     end
-    Ptot = vcat(P, Pbar)
-    return omegas, P, Pbar, Ptot
 end
 
-# ODE system
-function dPdr!(du, u, p, t)
-    r = t*inv_km_to_eV
-    @printf("r = %f\n", r)
-    for i in 1:50
-        du[1:8,i] = cross_prod(h()*p[i].*B + lamb(r)*L + mu(r)*D_f(p, u[1:8,:], u[9:16,:]), u[1:8,i])
-        du[9:16,i] = cross_prod(h()*(-p[i]).*B + lamb(r)*L + mu(r)*D_f(p, u[1:8,:], u[9:16,:]), u[9:16,i])
-    end
+#==========================================================================================
+                                        SOLVER
+==========================================================================================#
+function evolve(Eᵢ, Eₖ, Ebins, umin, umax)
+    #= Set up the physical constants and conversion factors. =#
+    J_to_eV = 6.25e18 # eV
+    s⁻¹_to_eV = 6.58e-16 # eV
+
+    #= Set up the SU(3) Lie algebra structure constants. =#
+    𝐟 = zeros(Float64, 8, 8, 8)
+    set_structure_constants(𝐟, [(1, 2, 3)], 2)
+    set_structure_constants(𝐟, [(1, 4, 7), (1, 6, 5), (2, 4, 6), (2, 5, 7), (3, 4, 5), (3, 7, 6)], 1)
+    set_structure_constants(𝐟, [(6, 7, 8), (4, 5, 8)], sqrt(3))
+
+    #= Set up the model parameters. =#
+    Δm²₁₃ = -2.458e-3 # eV²
+    ϵ = -0.031 # unitless, >0 for normal hierarchy, <0 for inverted hierarchy
+    θ₁₂ = 0.58 # radians
+    θ₁₃ = 0.15 # radians
+    h = sign(Δm²₁₃)
+    δ = 0
+    Ē_νₑ = 10e6 # eV
+    Ē_ν̄ₑ = 15e6 # eV
+    Ē_νₓ = 20e6 # eV
+    Ē_νᵧ= 20e6 # eV
+    ϵ_ν = 3 # unitless
+    L_ν = 1.5e44*J_to_eV*s⁻¹_to_eV # eV^2
+    r₀ = 10 # km
+    ϵ_ν = 3 # unitless
+
+    𝐁 = [ϵ*sin(2*θ₁₂)*cos(θ₁₃),
+      0,
+      sin(θ₁₃)^2 - ϵ*(cos(θ₁₂)^2 - sin(θ₁₂)^2*cos(θ₁₃)^2),
+      (1 - ϵ*sin(θ₁₂)^2)*sin(2*θ₁₃)*cos(δ),
+      (1 - ϵ*sin(θ₁₂)^2)*sin(2*θ₁₃)*sin(δ),
+      -ϵ*sin(2*θ₁₂)*sin(θ₁₃)*cos(δ),
+      -ϵ*sin(2*θ₁₂)*sin(θ₁₃)*sin(δ),
+      ϵ/(2*sqrt(3))*(3*cos(θ₁₃)^2 - 1 + 3*sin(θ₁₃)^2*(2*cos(θ₁₂)^2 - 1)) + 1/sqrt(3)*(1 - 3*cos(θ₁₃)^2)]
+
+    𝐋 = [0, 0, 1, 0, 0, 0, 0, 1/sqrt(3)]
+
+    # Energy averages
+    Ē = Dict([("nu_e", Ē_νₑ), ("nubar_e", Ē_ν̄ₑ), ("nu_x", Ē_νₓ), ("nubar_x", Ē_νₓ), ("nu_y", Ē_νᵧ), ("nubar_y", Ē_νᵧ)])
+    ω, 𝐏₀, f_ω, f_ω̄ = initialize_system_single(Eᵢ, Eₖ, Ebins, Ē, ϵ_ν, Δm²₁₃, L_ν)
+    prob = ODEProblem(dPdr, 𝐏₀, (umin, umax), [ω, f_ω, f_ω̄, 𝐁, 𝐋, r₀, 𝐟])
+    println("Solving the ODE...")
+    sol = solve(prob, CVODE_BDF(linear_solver = :GMRES), abstol = 1e-10, save_everystep = false, saveat = 1.0)
+    @save "sol.jld2" sol
 end
 
 # Setting up the allocated arrays
-omegas, P, Pbar, Ptot = initialize_system(1e6, 50e6, 50)
-L = L_f()
-B = B_f()
-f_pos = f_o.(omegas, "nu_e") + f_o.(omegas, "nu_x") + f_o.(omegas, "nu_y")
-f_neg = f_o.(-omegas, "nubar_e") + f_o.(-omegas, "nubar_x") + f_o.(-omegas, "nubar_y")
-f_neg = f_neg[end:-1:1]
+# rho_ee = 1/3 .+ 1/2 .*(sol[3, :, :] .+ 1/sqrt(3) .*sol[8, :, :])
+# rho_xx = 1/3 .+ 1/2 .*(-sol[3, :, :] .+ 1/sqrt(3) .*sol[8, :, :])
+# rho_yy = 1/3 .+ 1/2 .*(.- 2/sqrt(3) .*sol[8, :, :])
+# rho_bar_ee = 1/3 .+ 1/2 .*(sol[11, :, :] .+ 1/sqrt(3) .*sol[16, :, :])
+# rho_bar_xx = 1/3 .+ 1/2 .*(-sol[11, :, :] .+ 1/sqrt(3) .*sol[16, :, :])
+# rho_bar_yy = 1/3 .+ 1/2 .*(.- 2/sqrt(3) .*sol[16, :, :])
 
-umin = r_0/inv_km_to_eV
-umax = 100/inv_km_to_eV
-dtmin = 0.001/inv_km_to_eV
-saveat = LinRange(umin, umax, 1000)
-prob = ODEProblem(dPdr!, Ptot, (umin, umax), omegas)
-sol = solve(prob, CVODE_BDF(linear_solver = :GMRES), abstol = 1e-10, saveat = saveat, dtmax = dtmin)
-save_object("sol.jld2", sol)
-
-# sol = load_object("sol.jld2")
-# p = plot(sol.t*inv_km_to_eV, sol[3,1,:], label = "P1")
-# plot!(sol.t*inv_km_to_eV, sol[3,end,:], label = "P2")
+# Plotting
+# p = plot(sol.t, sol[3, 6, :], seriestype=:path,linestyle=:solid, lc=:blue, framestyle = :box, xticks =0:30:150, grid=false, legend = false, dpi = 300)
+# plot!(sol.t, sol[8, 6, :], seriestype=:path,linestyle=:solid, lc=:red, framestyle = :box, legend = false)
+# ylims!(0, 1)
+# xlims!(0, 150)
+# xlabel!("\$r \\, \\textrm{(km)}\$")
+# ylabel!(L"\rho_{ee}")
 # display(p)
+# savefig("vacuum+coll.png")
 # readline()
+
+# l = @layout [a b; c d; e f]
+# lc = [:orange, :green, :lightblue, :darkblue, :pink]
+# p = plot(sol.t, rho_ee[1, :], seriestype=:path,linestyle=:solid, lc=:orange, framestyle = :box, layout = l, xticks =0:20:150, grid=false, legend = false, dpi = 300)
+# for i in 1:length(E)
+#     plot!(p[1], sol.t, rho_ee[i, :], seriestype=:path,linestyle=:solid, lc=lc[i], framestyle = :box, legend = false)
+#     plot!(p[2], sol.t, rho_bar_ee[i, :], seriestype=:path,linestyle=:solid, lc=lc[i], framestyle = :box, legend = false)
+#     plot!(p[3], sol.t, rho_xx[i, :], seriestype=:path,linestyle=:solid, lc=lc[i], framestyle = :box, legend = false)
+#     plot!(p[4], sol.t, rho_bar_xx[i, :], seriestype=:path,linestyle=:solid, lc=lc[i], framestyle = :box, legend = false)
+#     plot!(p[5], sol.t, rho_yy[i, :], seriestype=:path,linestyle=:solid, lc=lc[i], framestyle = :box, legend = false)
+#     plot!(p[6], sol.t, rho_bar_yy[i, :], seriestype=:path,linestyle=:solid, lc=lc[i], framestyle = :box, legend = false)
+# end
+# ylims!(0, 1)
+# xlims!(0, 150)
+# xlabel!(p[5], "\$r \\, \\textrm{(km)}\$")
+# xlabel!(p[6], "\$r \\, \\textrm{(km)}\$")
+# ylabel!(p[1], L"\rho_{ee}")
+# ylabel!(p[3], L"\rho_{xx}")
+# ylabel!(p[5], L"\rho_{yy}")
+# display(p)
+# savefig("MSW.png")
+# readline()
+
+
