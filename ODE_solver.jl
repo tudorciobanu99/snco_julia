@@ -11,6 +11,9 @@ AUTHOR: Tudor Ciobanu
                         IMPORTING PACKAGES AND LIBRARIES
 ==========================================================================================#
 using DifferentialEquations, SpecialFunctions, FastGaussQuadrature, LinearAlgebra, Integrals, Sundials, JLD2, Printf, LaTeXStrings, BenchmarkTools
+using Logging: global_logger
+using TerminalLoggers: TerminalLogger
+global_logger(TerminalLogger())
 
 #==========================================================================================
                         SU(3) LIE ALGEBRA STRUCTURE CONSTANTS
@@ -188,7 +191,7 @@ function D(𝐏::Array{Float64,2}, ω::Array{Float64,1}, f_ω::Array{Float64,1},
     ωᵢ = ω[1]
     ωₖ = ω[end]
     @inbounds for i in 1:8
-        D[i] = GL_integral(f_ω.*𝐏[i, :], ωᵢ, ωₖ, order) + GL_integral(reverse(f_ω̄.*𝐏[i+8, :]), -ωₖ, -ωᵢ, order)
+        D[i] = GL_integral(f_ω.*𝐏[i, :], ωᵢ, ωₖ, order) + GL_integral(f_ω̄.*𝐏[i+8, :], ωᵢ, ωₖ, order)
     end
     return D
 end
@@ -268,8 +271,8 @@ function evolve(Eᵢ, Eₖ, Ebins, umin, umax)
     ω, 𝐏₀, f_ω, f_ω̄ = initialize_system_single(Eᵢ, Eₖ, Ebins, Ē, ϵ_ν, Δm²₁₃, L_ν)
     prob = ODEProblem(dPdr, 𝐏₀, (umin, umax), [ω, f_ω, f_ω̄, 𝐁, 𝐋, r₀, 𝐟])
     println("Solving the ODE...")
-    sol = solve(prob, CVODE_BDF(linear_solver = :GMRES), abstol = 1e-10, save_everystep = false, saveat = 1.0)
-    @save "sol.jld2" sol
+    sol = solve(prob, CVODE_BDF(linear_solver = :GMRES), abstol = 1e-10, save_everystep = false, saveat = 0.1, maxiters = 1e10)
+    return sol
 end
 
 # Setting up the allocated arrays
