@@ -326,24 +326,11 @@ function evolve(Eᵢ, Eₖ, Ebins, umin, umax)
     # @time begin
     #     sol = solve(prob, CVODE_BDF(linear_solver =:LapackDense), maxiters = Int(1.0e18), abstol = 1e-10, save_everystep = false, saveat = 0.1)
     # end
-    @load "sol_4.0_ih.jld2" sol
-    ts = sol.t
-    ρ_init = 1/3 .+ 1/2 .*(sol[3, 6, :] .+ 1/sqrt(3) .*sol[8, 6, :])
-    ρ_final = 1/3 .+ 1/2 .*(sol[3, 99, :] .+ 1/sqrt(3) .*sol[8, 99, :])
-    𝐏₀ = sol[:,:,end]
-    prob = ODEProblem(dPdr, 𝐏₀, (umin, umax), [ω, f_ω, f_ω̄, 𝐁, 𝐋, r₀, 𝐟])
+    @load "sol_4.0_ih_final.jld2" 𝐏
+    prob = ODEProblem(dPdr, 𝐏, (umin, umax), [ω, f_ω, f_ω̄, 𝐁, 𝐋, r₀, 𝐟])
     @time begin
         soln =  solve(prob, maxiters = Int(1.0e18), abstol = 1e-10, save_everystep = false, saveat = 1)
     end
-    ρₑₑ = 1/3 .+ 1/2 .*(soln[3, :, :] .+ 1/sqrt(3) .*soln[8, :, :])
-    p = plot(soln.t, ρₑₑ[6, :], xaxis=:log, label = "1")
-    plot!(soln.t, ρₑₑ[99, :], label = "2")
-    plot!(ts, ρ_init, label = "3")
-    plot!(ts, ρ_final, label = "4")
-    ylims!(0, 1)
-    xlims!(9000, 50000)
-    display(p)
-    readline()
     @save "sol_4.0_ih_add.jld2" soln
 end
 
